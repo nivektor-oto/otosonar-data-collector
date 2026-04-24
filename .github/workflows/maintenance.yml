@@ -1,0 +1,46 @@
+name: maintenance
+
+# Refresh sweep + deal scoring. Much lighter than scraping, runs on a single
+# ephemeral runner. Fine to schedule more aggressively than the scrape itself.
+
+on:
+  schedule:
+    - cron: "30 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: maintenance
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      WORKER_ID: gh-maint-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install asyncpg==0.30.0
+      - name: Enqueue refresh + sweep stale
+        run: python scripts/refresh_sweep.py --source arabam --refresh-limit 8000
+
+  deal-scoring:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: refresh
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install asyncpg==0.30.0
+      - name: Score deals + emit alerts
+        run: python scripts/score_deals.py --limit 30000 --lookback-hours 48

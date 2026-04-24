@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+.env
+.env.local
+*.log
+/tmp/
+/data/
+/dumps/
+.playwright/
+.coverage
+htmlcov/

@@ -1,0 +1,75 @@
+name: scrape
+
+# GitHub Actions free minutes are unlimited on public repos.
+# Each matrix shard runs a fresh runner with its own outbound IP — effectively
+# free IP rotation. We cap each job at 5h wall-clock to stay well under the 6h
+# platform limit.
+
+on:
+  schedule:
+    - cron: "15 */2 * * *"   # every 2h, at :15 to dodge the top-of-hour stampede
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Which source adapter to run"
+        required: true
+        default: "arabam"
+        type: choice
+        options: [arabam, sahibinden]
+      seed:
+        description: "Seed discovery jobs from catalog before scraping"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      budget_seconds:
+        description: "Wall-clock budget per shard (seconds)"
+        required: false
+        default: "16200"  # 4h30m
+
+concurrency:
+  group: scrape-${{ github.event.inputs.source || 'arabam' }}
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      WORKER_ID: gh-${{ github.run_id }}-${{ matrix.shard }}
+      MAX_CONCURRENT: "2"
+      JOB_BATCH_SIZE: "25"
+      FETCH_DELAY_MIN_MS: "800"
+      FETCH_DELAY_MAX_MS: "2400"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Seed discovery jobs (first shard only)
+        if: matrix.shard == 1 && github.event.inputs.seed == 'true'
+        run: |
+          python -m src.worker \
+            --source ${{ github.event.inputs.source || 'arabam' }} \
+            --seed --seed-only --seed-pages 2
+
+      - name: Run scraper shard
+        run: |
+          python -m src.worker \
+            --source ${{ github.event.inputs.source || 'arabam' }} \
+            --shard ${{ matrix.shard }} \
+            --shards 8 \
+            --budget-seconds ${{ github.event.inputs.budget_seconds || '16200' }}
