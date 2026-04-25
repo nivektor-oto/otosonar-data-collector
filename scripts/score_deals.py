@@ -25,10 +25,12 @@ from src.db import close_pool, connection  # noqa: E402
 log = logging.getLogger("scoring")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s :: %(message)s")
 
-DEAL_THRESHOLD = 0.15
+DEAL_THRESHOLD = float(os.environ.get("DEAL_SCORE_MIN", "0.10"))
 # Soft launch: 5 yerine 3. Pool 2.300 ilanken sadece 70/1258 combo 5+ emsale ulaşıyor.
-# Veri büyüdükçe 5'e çıkar (env var ile).
 MIN_EMSAL = int(os.environ.get("DEAL_MIN_EMSAL", "3"))
+# Pool küçükken confidence formülü 0.5'e ulaşamaz (size oranı küçük).
+# Soft launch için 0.35 — pool büyüdükçe env ile sıkılaştırılır.
+MIN_CONFIDENCE = float(os.environ.get("DEAL_MIN_CONFIDENCE", "0.35"))
 
 
 async def score_all(*, limit: int, lookback_hours: int) -> dict[str, int]:
@@ -112,7 +114,7 @@ async def score_all(*, limit: int, lookback_hours: int) -> dict[str, int]:
             )
             scored += 1
 
-            if deal_score >= DEAL_THRESHOLD and confidence >= 0.5:
+            if deal_score >= DEAL_THRESHOLD and confidence >= MIN_CONFIDENCE:
                 savings = int(median - price)
                 await conn.execute(
                     """
