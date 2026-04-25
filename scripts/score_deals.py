@@ -12,14 +12,23 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
+import sys
 
-from src.db import close_pool, connection
+# Repo root'u sys.path'a ekle (PYTHONPATH env'den bağımsız çalışsın).
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from src.db import close_pool, connection  # noqa: E402
 
 log = logging.getLogger("scoring")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s :: %(message)s")
 
 DEAL_THRESHOLD = 0.15
-MIN_EMSAL = 5
+# Soft launch: 5 yerine 3. Pool 2.300 ilanken sadece 70/1258 combo 5+ emsale ulaşıyor.
+# Veri büyüdükçe 5'e çıkar (env var ile).
+MIN_EMSAL = int(os.environ.get("DEAL_MIN_EMSAL", "3"))
 
 
 async def score_all(*, limit: int, lookback_hours: int) -> dict[str, int]:
@@ -144,8 +153,14 @@ async def main() -> None:
     log.info("scoring complete: %s", stats)
 
 
-if __name__ == "__main__":
+async def _entrypoint() -> None:
+    # Tek asyncio.run loop'u — close_pool ayrı asyncio.run'da
+    # "Event loop is closed" RuntimeError veriyordu.
     try:
-        asyncio.run(main())
+        await main()
     finally:
-        asyncio.run(close_pool())
+        await close_pool()
+
+
+if __name__ == "__main__":
+    asyncio.run(_entrypoint())

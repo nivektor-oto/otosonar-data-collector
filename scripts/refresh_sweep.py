@@ -8,10 +8,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
+import sys
 
-from src import queue
-from src.config import SETTINGS
-from src.db import close_pool, connection
+# Repo root'u sys.path'a ekle ki "from src import ..." PYTHONPATH env olmadan da çalışsın.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from src import queue  # noqa: E402
+from src.config import SETTINGS  # noqa: E402
+from src.db import close_pool, connection  # noqa: E402
 
 log = logging.getLogger("maintenance")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s :: %(message)s")
@@ -62,8 +69,14 @@ async def main() -> None:
     log.info("sweep: %s", stats)
 
 
-if __name__ == "__main__":
+async def _entrypoint() -> None:
+    # Tek loop — eski "asyncio.run + asyncio.run(close_pool)" deseni
+    # "Event loop is closed" RuntimeError veriyordu.
     try:
-        asyncio.run(main())
+        await main()
     finally:
-        asyncio.run(close_pool())
+        await close_pool()
+
+
+if __name__ == "__main__":
+    asyncio.run(_entrypoint())
