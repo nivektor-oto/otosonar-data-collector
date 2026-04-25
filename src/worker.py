@@ -119,11 +119,11 @@ async def run(args: argparse.Namespace) -> None:
                 except (TypeError, ValueError):
                     payload = {}
 
-                if not await _shard_allowed(payload, args.shard, args.shards):
-                    # not ours — return to queue for another shard
-                    await queue.mark_failed(job["id"], "shard-skip", retry=True)
-                    continue
-
+                # Note: no application-level shard filter. Multiple shards
+                # claim from the same queue concurrently via FOR UPDATE SKIP
+                # LOCKED — that's already enough parallelism without the
+                # hash-based bucket that was burning attempts and clogging
+                # the queue with shard-skip "failures".
                 await _handle_job(
                     fetcher=fetcher,
                     job_id=job["id"],
