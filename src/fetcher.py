@@ -1,10 +1,15 @@
-"""Playwright-backed page fetcher with stealth touches.
+"""HTTP/Browser fetchers for the scraper.
 
-Design goals:
-  - Keep one browser across many fetches (launch cost matters in CI)
-  - Rotate user agents per context
-  - Randomised human-like delays between navigations
-  - Gracefully degrade when anti-bot walls arrive
+Two backends:
+  1. HttpFetcher (curl_cffi) — TLS-fingerprint-impersonating HTTP client.
+     Fast, resource-light, gets past Cloudflare TLS-level bot checks.
+     Default for arabam.com; passes 200 reliably (verified 2026-04-26).
+  2. StealthFetcher (Playwright) — full Chromium for sites that need JS
+     execution (Cloudflare turnstile, DataDome, anti-bot JS challenges).
+     Reserved for sahibinden.com.
+
+Selection rules live in `select_fetcher(source)`. Both expose the same
+async context-manager + `.fetch()` contract returning `FetchResult`.
 """
 from __future__ import annotations
 
@@ -13,6 +18,7 @@ import random
 from dataclasses import dataclass
 from typing import Optional
 
+from curl_cffi import requests as curl_requests
 from playwright.async_api import (
     Browser,
     BrowserContext,
@@ -39,6 +45,12 @@ window.navigator.permissions.query = (parameters) => (
 """
 
 
+# curl_cffi browser fingerprints to rotate through. chrome124 has the
+# strongest success rate against arabam.com per local probe; chrome131,
+# chrome120 are fallbacks if a streak of 403s shows up.
+CURL_IMPERSONATIONS = ["chrome124", "chrome131", "chrome120"]
+
+
 @dataclass
 class FetchResult:
     url: str
@@ -48,6 +60,107 @@ class FetchResult:
     blocked: bool = False
     error: Optional[str] = None
 
+
+# --------------------------------------------------------------------------- #
+# curl_cffi-based HTTP fetcher
+# --------------------------------------------------------------------------- #
+
+class HttpFetcher:
+    """Async-compatible curl_cffi fetcher.
+
+    curl_cffi itself is sync-only at runtime, so we hop to a thread pool via
+    `asyncio.to_thread`. That keeps the worker's await-driven loop happy
+    without blocking on each request.
+    """
+
+    def __init__(self, *, impersonate: Optional[str] = None) -> None:
+        self._impersonate = impersonate or CURL_IMPERSONATIONS[0]
+        self._session: Optional[curl_requests.Session] = None
+        self._ua: Optional[str] = None
+
+    async def __aenter__(self) -> "HttpFetcher":
+        self._build_session()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        try:
+            if self._session is not None:
+                self._session.close()
+        except Exception:
+            pass
+
+    def _build_session(self) -> None:
+        self._ua = random.choice(USER_AGENTS)
+        self._session = curl_requests.Session(impersonate=self._impersonate)
+        # curl_cffi assigns sensible defaults under impersonate; we still
+        # nudge a few headers to look natural and TR-flavoured.
+        self._session.headers.update({
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Upgrade-Insecure-Requests": "1",
+        })
+
+    async def fetch(self, url: str, *, wait_selector: Optional[str] = None) -> FetchResult:
+        assert self._session is not None
+        # Polite jitter so we don't hammer one host
+        delay_ms = random.randint(SETTINGS.fetch_delay_min_ms, SETTINGS.fetch_delay_max_ms)
+        await asyncio.sleep(delay_ms / 1000)
+
+        def _do() -> FetchResult:
+            assert self._session is not None
+            try:
+                resp = self._session.get(
+                    url,
+                    timeout=SETTINGS.fetch_timeout_ms / 1000,
+                    allow_redirects=True,
+                    headers={
+                        "Sec-Fetch-Dest": "document",
+                        "Sec-Fetch-Mode": "navigate",
+                        "Sec-Fetch-Site": "none",
+                        "Sec-Fetch-User": "?1",
+                    },
+                )
+                status = resp.status_code
+                final_url = resp.url
+                html = resp.text or ""
+                blocked = _looks_blocked(html, status)
+                return FetchResult(
+                    url=url,
+                    status=status,
+                    html=None if blocked else html,
+                    final_url=final_url,
+                    blocked=blocked,
+                )
+            except Exception as e:
+                return FetchResult(
+                    url=url, status=None, html=None, final_url=None,
+                    error=f"{type(e).__name__}: {e}",
+                )
+
+        return await asyncio.to_thread(_do)
+
+    async def rotate_identity(self) -> None:
+        """Cycle to the next impersonation profile + fresh session/cookies."""
+        try:
+            if self._session is not None:
+                self._session.close()
+        except Exception:
+            pass
+        # rotate impersonate
+        try:
+            idx = CURL_IMPERSONATIONS.index(self._impersonate)
+        except ValueError:
+            idx = -1
+        self._impersonate = CURL_IMPERSONATIONS[(idx + 1) % len(CURL_IMPERSONATIONS)]
+        self._build_session()
+
+
+# --------------------------------------------------------------------------- #
+# Playwright-based browser fetcher (Cloudflare turnstile, DataDome, etc.)
+# --------------------------------------------------------------------------- #
 
 class StealthFetcher:
     def __init__(self) -> None:
@@ -155,13 +268,35 @@ class StealthFetcher:
         await self._refresh_context()
 
 
+# --------------------------------------------------------------------------- #
+# Selection
+# --------------------------------------------------------------------------- #
+
+# Sites that require JS execution to pass anti-bot. Anything not in this set
+# defaults to the much-cheaper HttpFetcher (curl_cffi).
+_BROWSER_REQUIRED_SOURCES = {"sahibinden"}
+
+
+def select_fetcher(source: Optional[str]):
+    """Return an *async-context-manager-compatible* fetcher for the source.
+
+    Heuristic: only spin up a browser when the target needs one. arabam.com
+    yields fine to curl_cffi with chrome124 impersonation.
+    """
+    if source in _BROWSER_REQUIRED_SOURCES:
+        return StealthFetcher()
+    return HttpFetcher()
+
+
 _BLOCKED_MARKERS = (
     "cf-chl-",
-    "Just a moment...",
+    "just a moment...",
     "datadome",
-    "Checking your browser",
-    "Access denied",
+    "checking your browser",
+    "access denied",
     "captcha-delivery",
+    "geo.captcha-delivery",
+    "/cdn-cgi/challenge-platform/",
 )
 
 
@@ -170,5 +305,5 @@ def _looks_blocked(html: str, status: Optional[int]) -> bool:
         return True
     if not html:
         return False
-    lowered = html[:10000].lower()
+    lowered = html[:20000].lower()
     return any(marker.lower() in lowered for marker in _BLOCKED_MARKERS)

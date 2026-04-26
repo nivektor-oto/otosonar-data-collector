@@ -22,7 +22,7 @@ from . import persistence, queue
 from .catalog import arabam_brand_model_pairs
 from .config import SETTINGS
 from .db import close_pool
-from .fetcher import FetchResult, StealthFetcher
+from .fetcher import FetchResult, StealthFetcher, select_fetcher
 from .sources import REGISTRY, ParsedDiscovery
 
 logging.basicConfig(
@@ -94,7 +94,10 @@ async def run(args: argparse.Namespace) -> None:
 
     run_id = await persistence.start_run(SETTINGS.worker_id, "shard", source or "any")
 
-    async with StealthFetcher() as fetcher:
+    # Pick the right backend per source. arabam → curl_cffi (HttpFetcher),
+    # sahibinden → Playwright (StealthFetcher). Falls back to curl_cffi if
+    # source is unspecified.
+    async with select_fetcher(source) as fetcher:
         while True:
             if time.monotonic() - start > budget_seconds:
                 log.info("budget exhausted, stopping")
@@ -139,7 +142,7 @@ async def run(args: argparse.Namespace) -> None:
 
 async def _handle_job(
     *,
-    fetcher: StealthFetcher,
+    fetcher: Any,  # HttpFetcher | StealthFetcher (duck-typed)
     job_id: str,
     job_type: str,
     source: str,
