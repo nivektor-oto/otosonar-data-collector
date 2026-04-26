@@ -8,14 +8,23 @@ Two backends:
      execution (Cloudflare turnstile, DataDome, anti-bot JS challenges).
      Reserved for sahibinden.com.
 
+sahibinden.com için ek hibrit çözüm: kullanıcı bir kez headed Playwright'la
+Cloudflare challenge'ı elle çözer (`scripts/refresh_sahibinden_cf.py`),
+cookie + UA `~/.config/otosonar/sahibinden-cf.json`'a yazılır. HttpFetcher
+sahibinden URL'lerinde bu cookie'leri inject eder. Cookie ömrü 30dk-2h.
+
 Selection rules live in `select_fetcher(source)`. Both expose the same
 async context-manager + `.fetch()` contract returning `FetchResult`.
 """
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import random
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from curl_cffi import requests as curl_requests
@@ -108,6 +117,22 @@ class HttpFetcher:
         # Polite jitter so we don't hammer one host
         delay_ms = random.randint(SETTINGS.fetch_delay_min_ms, SETTINGS.fetch_delay_max_ms)
         await asyncio.sleep(delay_ms / 1000)
+
+        # sahibinden için cf_clearance cookie + UA inject (refresh_sahibinden_cf.py
+        # ile elle yenilenir). Eskiyse atlar — _looks_blocked 403'ü yakalar.
+        cf_payload = _load_sahibinden_cf(url)
+        if cf_payload is not None:
+            self._session.headers["User-Agent"] = cf_payload["user_agent"]
+            for c in cf_payload["cookies"]:
+                try:
+                    self._session.cookies.set(
+                        c["name"],
+                        c["value"],
+                        domain=c.get("domain", ".sahibinden.com"),
+                        path=c.get("path", "/"),
+                    )
+                except Exception:
+                    pass
 
         def _do() -> FetchResult:
             assert self._session is not None
@@ -269,22 +294,66 @@ class StealthFetcher:
 
 
 # --------------------------------------------------------------------------- #
+# sahibinden cf_clearance cookie loader
+# --------------------------------------------------------------------------- #
+
+_CF_PATH = Path.home() / ".config" / "otosonar" / "sahibinden-cf.json"
+_CF_MAX_AGE_SECONDS = 2 * 60 * 60  # 2 saat — sahibinden cookie genelde bu kadar sürüyor
+
+
+def _load_sahibinden_cf(url: str) -> Optional[dict]:
+    """sahibinden URL'i için cookie+UA payload'ını yükle. URL başka host ise None."""
+    if "sahibinden" not in url:
+        return None
+    if not _CF_PATH.exists():
+        return None
+    try:
+        data = json.loads(_CF_PATH.read_text())
+    except Exception:
+        return None
+    saved_at = data.get("saved_at")
+    if not saved_at:
+        return None
+    try:
+        saved = datetime.fromisoformat(saved_at)
+        age = (datetime.now(timezone.utc) - saved).total_seconds()
+    except Exception:
+        return None
+    if age > _CF_MAX_AGE_SECONDS:
+        return None  # eski → kullanma, fetcher 403 alır + uyarı
+    if not data.get("cookies"):
+        return None
+    return data
+
+
+# --------------------------------------------------------------------------- #
 # Selection
 # --------------------------------------------------------------------------- #
 
-# Sites that require JS execution to pass anti-bot. Anything not in this set
-# defaults to the much-cheaper HttpFetcher (curl_cffi).
-_BROWSER_REQUIRED_SOURCES = {"sahibinden"}
+# sahibinden için akış:
+#   - cookie dosyası taze (<2h) → HttpFetcher (curl_cffi) + cookie inject
+#   - cookie eski/yok → StealthFetcher (Playwright; muhtemelen 403, uyarı için)
+def _sahibinden_cookie_fresh() -> bool:
+    if not _CF_PATH.exists():
+        return False
+    try:
+        data = json.loads(_CF_PATH.read_text())
+        saved = datetime.fromisoformat(data.get("saved_at", ""))
+        age = (datetime.now(timezone.utc) - saved).total_seconds()
+        return age <= _CF_MAX_AGE_SECONDS and bool(data.get("cookies"))
+    except Exception:
+        return False
 
 
 def select_fetcher(source: Optional[str]):
     """Return an *async-context-manager-compatible* fetcher for the source.
 
     Heuristic: only spin up a browser when the target needs one. arabam.com
-    yields fine to curl_cffi with chrome124 impersonation.
+    yields fine to curl_cffi with chrome124 impersonation. sahibinden kullanır
+    HttpFetcher + cf cookie inject (cookie taze ise) — yoksa StealthFetcher.
     """
-    if source in _BROWSER_REQUIRED_SOURCES:
-        return StealthFetcher()
+    if source == "sahibinden":
+        return HttpFetcher() if _sahibinden_cookie_fresh() else StealthFetcher()
     return HttpFetcher()
 
 
