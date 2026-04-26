@@ -7,13 +7,16 @@ name: scrape
 
 on:
   schedule:
+    # Cron'da varsayılan kaynak: sahibinden. arabam.com Cloudflare 100% block
+    # ediyor (2026-04-25 itibarı), bypass eklenince matrix'e sahibinden +
+    # arabam birlikte koyulacak. workflow_dispatch ile arabam manuel tetiklenebilir.
     - cron: "15 */2 * * *"   # every 2h, at :15 to dodge the top-of-hour stampede
   workflow_dispatch:
     inputs:
       source:
         description: "Which source adapter to run"
         required: true
-        default: "arabam"
+        default: "sahibinden"
         type: choice
         options: [arabam, sahibinden]
       seed:
@@ -28,7 +31,7 @@ on:
         default: "16200"  # 4h30m
 
 concurrency:
-  group: scrape-${{ github.event.inputs.source || 'arabam' }}
+  group: scrape-${{ github.event.inputs.source || 'sahibinden' }}
   cancel-in-progress: false
 
 jobs:
@@ -63,13 +66,13 @@ jobs:
         if: matrix.shard == 1 && github.event.inputs.seed == 'true'
         run: |
           python -m src.worker \
-            --source ${{ github.event.inputs.source || 'arabam' }} \
+            --source ${{ github.event.inputs.source || 'sahibinden' }} \
             --seed --seed-only --seed-pages 2
 
       - name: Run scraper shard
         run: |
           python -m src.worker \
-            --source ${{ github.event.inputs.source || 'arabam' }} \
+            --source ${{ github.event.inputs.source || 'sahibinden' }} \
             --shard ${{ matrix.shard }} \
             --shards 8 \
             --budget-seconds ${{ github.event.inputs.budget_seconds || '16200' }}
