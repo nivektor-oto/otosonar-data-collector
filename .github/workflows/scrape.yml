@@ -7,16 +7,20 @@ name: scrape
 
 on:
   schedule:
-    # Cron'da varsayılan kaynak: sahibinden. arabam.com Cloudflare 100% block
-    # ediyor (2026-04-25 itibarı), bypass eklenince matrix'e sahibinden +
-    # arabam birlikte koyulacak. workflow_dispatch ile arabam manuel tetiklenebilir.
-    - cron: "15 */2 * * *"   # every 2h, at :15 to dodge the top-of-hour stampede
+    # KAYNAK DURUMU (2026-04-26):
+    #  - arabam.com  → Cloudflare 100% 403 (25/25 fetch fail). Loud-fail.
+    #  - sahibinden.com → Adapter PLACEHOLDER (src/sources/sahibinden.py
+    #    parser TODO). Silent-fail (seed 0, fetch 0).
+    # İki seçenekten arabam loud-fail'de kalsın → log'a yansır, izlenir,
+    # rate-limit çözüldüğünde yeniden yakalar. sahibinden parser hazır
+    # olunca matrix'e iki kaynak birden konacak.
+    - cron: "15 */2 * * *"
   workflow_dispatch:
     inputs:
       source:
         description: "Which source adapter to run"
         required: true
-        default: "sahibinden"
+        default: "arabam"
         type: choice
         options: [arabam, sahibinden]
       seed:
@@ -31,7 +35,7 @@ on:
         default: "16200"  # 4h30m
 
 concurrency:
-  group: scrape-${{ github.event.inputs.source || 'sahibinden' }}
+  group: scrape-${{ github.event.inputs.source || 'arabam' }}
   cancel-in-progress: false
 
 jobs:
@@ -66,13 +70,13 @@ jobs:
         if: matrix.shard == 1 && github.event.inputs.seed == 'true'
         run: |
           python -m src.worker \
-            --source ${{ github.event.inputs.source || 'sahibinden' }} \
+            --source ${{ github.event.inputs.source || 'arabam' }} \
             --seed --seed-only --seed-pages 2
 
       - name: Run scraper shard
         run: |
           python -m src.worker \
-            --source ${{ github.event.inputs.source || 'sahibinden' }} \
+            --source ${{ github.event.inputs.source || 'arabam' }} \
             --shard ${{ matrix.shard }} \
             --shards 8 \
             --budget-seconds ${{ github.event.inputs.budget_seconds || '16200' }}
