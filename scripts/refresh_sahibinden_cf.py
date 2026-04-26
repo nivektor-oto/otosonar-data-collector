@@ -1,19 +1,21 @@
-"""sahibinden.com cf_clearance cookie yenileme aracı.
+"""sahibinden.com cf_clearance cookie yenileme aracı (v2 — browser_cookie3).
 
 Kullanım:
     cd /home/aller/Desktop/otosonar-data-collector
     .venv/bin/python scripts/refresh_sahibinden_cf.py
 
 Akış:
-    1. Görünür (headed) Chromium açılır.
-    2. sahibinden.com/kategori/otomobil sayfasına gider.
-    3. Cloudflare turnstile / challenge varsa kullanıcı elle çözer (1 tık).
-    4. Sayfada gerçek arama sonucu göründüğünde Enter'a bas.
-    5. Script cookie'leri + user-agent'ı ~/.config/otosonar/sahibinden-cf.json
-       dosyasına yazar (mode 600). Scraper bunu okuyup curl_cffi
-       request'lerine inject eder.
+    1. Sen normal tarayıcında (Firefox / Brave / Chrome) yeni sekme aç,
+       https://www.sahibinden.com/kategori/otomobil sayfasına git.
+    2. Eğer "I am human" Cloudflare kutusu çıkarsa tıkla. Sayfada gerçek
+       araba ilanları görünene kadar bekle.
+    3. Tarayıcı sekmesini KAPATMA. Terminale dön, Enter'a bas.
+    4. Script Firefox/Chrome/Brave SQLite cookie store'larından sahibinden
+       cookie'lerini okur, ~/.config/otosonar/sahibinden-cf.json'a yazar.
 
-Cookie ömrü genelde 30dk-2h. cron öncesi yaş kontrolü scrape_local.sh içinde.
+Neden bu yol: Playwright'ın açtığı tarayıcı çoğu zaman Cloudflare'i geçemez
+(automation flag'leri). Senin günlük tarayıcın insan kullanım örüntüsüne
+sahip olduğu için Cloudflare kolayca geçirir.
 """
 from __future__ import annotations
 
@@ -23,102 +25,144 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+import browser_cookie3
 
 CFG_DIR = Path.home() / ".config" / "otosonar"
 OUT = CFG_DIR / "sahibinden-cf.json"
 
-STEALTH_INIT = """
-Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-Object.defineProperty(navigator, 'languages', {get: () => ['tr-TR', 'tr', 'en-US', 'en']});
-Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-window.chrome = window.chrome || { runtime: {} };
-"""
+BROWSERS = ["firefox", "brave", "chrome", "chromium", "edge", "vivaldi", "opera"]
+BROWSER_LABELS = {
+    "firefox": "Firefox",
+    "brave": "Brave",
+    "chrome": "Google Chrome",
+    "chromium": "Chromium",
+    "edge": "Edge",
+    "vivaldi": "Vivaldi",
+    "opera": "Opera",
+}
 
-TARGET_URL = "https://www.sahibinden.com/kategori/otomobil"
+DEFAULT_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0"
+)
+
+
+def collect_from_all_browsers() -> tuple[list[dict], list[str], str | None]:
+    """Tüm yerel browser cookie store'larından sahibinden cookie'lerini topla."""
+    all_cookies: dict[str, dict] = {}  # name → cookie (en yeni)
+    found_in: list[str] = []
+    errors: list[str] = []
+    detected_ua: str | None = None
+
+    for name in BROWSERS:
+        fn = getattr(browser_cookie3, name, None)
+        if fn is None:
+            continue
+        try:
+            cj = fn(domain_name="sahibinden.com")
+        except Exception as e:
+            errors.append(f"{BROWSER_LABELS[name]}: {type(e).__name__}: {e}")
+            continue
+
+        cookies_here = list(cj)
+        if not cookies_here:
+            continue
+        found_in.append(BROWSER_LABELS[name])
+        # Firefox cookie değeri çoğunlukla en yeni → over-write
+        for c in cookies_here:
+            all_cookies[c.name] = {
+                "name": c.name,
+                "value": c.value,
+                "domain": c.domain,
+                "path": c.path or "/",
+            }
+        # UA bilgisi cookie store'da yok; firefox prefs.js okuyalım — basit yol:
+        if detected_ua is None and name == "firefox":
+            ua = _read_firefox_user_agent()
+            if ua:
+                detected_ua = ua
+
+    return list(all_cookies.values()), found_in, errors[:5], detected_ua
+
+
+def _read_firefox_user_agent() -> str | None:
+    """Firefox prefs.js içinden general.useragent.override varsa al; yoksa
+    sürüm numarasından default UA üret."""
+    try:
+        ff_root = Path.home() / ".mozilla" / "firefox"
+        for prof in ff_root.glob("*.default*"):
+            prefs = prof / "prefs.js"
+            if not prefs.exists():
+                continue
+            for line in prefs.read_text(errors="ignore").splitlines():
+                if "general.useragent.override" in line:
+                    parts = line.split('"')
+                    if len(parts) >= 4:
+                        return parts[3]
+    except Exception:
+        pass
+    return None
 
 
 def main() -> int:
     CFG_DIR.mkdir(parents=True, exist_ok=True)
 
-    print(f"[refresh-cf] hedef: {TARGET_URL}")
-    print("[refresh-cf] Browser açılıyor...")
+    print()
+    print("=" * 72)
+    print("SAHİBİNDEN COOKIE YENİLEME (v2 — kendi tarayıcından)")
+    print("=" * 72)
+    print()
+    print("ADIM 1: Normal tarayıcında (Firefox/Brave/Chrome) yeni sekme aç,")
+    print("        https://www.sahibinden.com/kategori/otomobil 'a git.")
+    print("ADIM 2: 'I am human' kutusu çıkarsa tıkla. Sayfada gerçek arabalar")
+    print("        görünene kadar bekle (5-10 sn).")
+    print("ADIM 3: Sekmeyi KAPATMA. Buraya dön + Enter'a bas.")
+    print()
+    try:
+        input("Hazırsan Enter: ")
+    except KeyboardInterrupt:
+        print("\niptal.")
+        return 130
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=False,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--lang=tr-TR",
-                "--start-maximized",
-            ],
-        )
-        context = browser.new_context(
-            locale="tr-TR",
-            timezone_id="Europe/Istanbul",
-            viewport={"width": 1366, "height": 768},
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-            ),
-            extra_http_headers={
-                "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-            },
-        )
-        context.add_init_script(STEALTH_INIT)
-        page = context.new_page()
-        try:
-            page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=60_000)
-        except Exception as e:
-            print(f"[refresh-cf] navigation hatası: {e}")
+    cookies, found_in, errors, ua = collect_from_all_browsers()
 
+    if not cookies:
         print()
-        print("=" * 70)
-        print("ŞİMDİ:")
-        print("  - Açılan tarayıcıda Cloudflare 'I am human' kutusu varsa tıkla.")
-        print("  - Sayfada gerçek araba sonuçları görünürse hazırsın demektir.")
-        print("  - Buradan terminale dönüp ENTER'a bas, cookie kaydedilecek.")
-        print("=" * 70)
-        try:
-            input("[refresh-cf] Hazır olduğunda Enter: ")
-        except KeyboardInterrupt:
-            print("\n[refresh-cf] iptal edildi.")
-            browser.close()
-            return 130
-
-        cookies = context.cookies()
-        try:
-            ua = page.evaluate("() => navigator.userAgent")
-        except Exception:
-            ua = (
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-            )
-
-        # Sahibinden cookie'lerini filtrele (alanı .sahibinden.com olanlar)
-        cf_cookies = [c for c in cookies if "sahibinden" in c.get("domain", "")]
-        has_cf_clearance = any(c.get("name") == "cf_clearance" for c in cf_cookies)
-
-        payload = {
-            "user_agent": ua,
-            "cookies": cf_cookies,
-            "saved_at": datetime.now(timezone.utc).isoformat(),
-            "host": "sahibinden.com",
-            "has_cf_clearance": has_cf_clearance,
-        }
-
-        OUT.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
-        os.chmod(OUT, 0o600)
-
+        print("HATA: Hiçbir tarayıcıda sahibinden cookie bulunamadı.")
+        if errors:
+            print("Browser hataları:")
+            for e in errors:
+                print(f"  - {e}")
         print()
-        print(f"[refresh-cf] Yazıldı: {OUT}")
-        print(f"[refresh-cf] cookie sayısı: {len(cf_cookies)}")
-        print(f"[refresh-cf] cf_clearance var mı: {has_cf_clearance}")
-        if not has_cf_clearance:
-            print("[refresh-cf] UYARI: cf_clearance cookie yok — challenge geçilmemiş olabilir.")
+        print("İPUCU: Tarayıcında sayfayı açmadan önce kapatmış olabilirsin.")
+        print("       Ya da kullandığın tarayıcı listede yok. Tekrar dene.")
+        return 1
 
-        browser.close()
-        return 0 if has_cf_clearance else 2
+    has_cf = any(c["name"] == "cf_clearance" for c in cookies)
+    payload = {
+        "user_agent": ua or DEFAULT_UA,
+        "cookies": cookies,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "host": "sahibinden.com",
+        "has_cf_clearance": has_cf,
+        "source_browsers": found_in,
+    }
+
+    OUT.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    os.chmod(OUT, 0o600)
+
+    print()
+    print(f"Yazıldı: {OUT}")
+    print(f"  cookie sayısı   : {len(cookies)}")
+    print(f"  cf_clearance var: {has_cf}")
+    print(f"  kaynak browser  : {', '.join(found_in)}")
+    print(f"  user-agent      : {(ua or DEFAULT_UA)[:80]}")
+    print()
+    if not has_cf:
+        print("UYARI: cf_clearance cookie YOK — Cloudflare challenge geçilmemiş.")
+        print("       Tarayıcıda sayfa gerçekten yüklendi mi? Tekrar dene.")
+        return 2
+    print("Hazır. Sonraki ~2 saat boyunca scraper sahibinden'i 200 alır.")
+    return 0
 
 
 if __name__ == "__main__":

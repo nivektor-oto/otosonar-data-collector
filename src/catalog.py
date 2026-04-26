@@ -62,3 +62,14 @@ def arabam_brand_model_pairs() -> list[tuple[str, str | None]]:
         else:
             pairs.append((brand, None))
     return pairs
+
+
+def sahibinden_brand_model_pairs() -> list[tuple[str, str | None]]:
+    """sahibinden için aynı brand/model kataloğu kullanılır.
+
+    Adapter (src/sources/sahibinden.py) brand/model'i kendi URL slug'larına
+    çeviriyor; arabam ile %95+ örtüşüyor (slug'lar marka isimlerinin TR-norm
+    halleri). Brand-wide gezi (model=None) çok ilan döndürüp 2-3 sayfada
+    bizi 429'a sokabilir, o yüzden öncelikle model-spesifik pair'lere odaklan.
+    """
+    return arabam_brand_model_pairs()

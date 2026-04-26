@@ -231,7 +231,15 @@ class StealthFetcher:
                 await self._context.close()
             except Exception:
                 pass
-        self._user_agent = random.choice(USER_AGENTS)
+        # sahibinden cookie payload'ı varsa, kendi UA'sını ve cookie'lerini
+        # browser context'e bind et — challenge'ı atlatmak için (kullanıcı
+        # Chrome'da bir kez geçti, biz aynı kimlikle devam ediyoruz).
+        cf = _load_sahibinden_cf("https://www.sahibinden.com/")
+        if cf:
+            self._user_agent = cf["user_agent"]
+        else:
+            self._user_agent = random.choice(USER_AGENTS)
+
         self._context = await self._browser.new_context(
             user_agent=self._user_agent,
             locale="tr-TR",
@@ -247,6 +255,22 @@ class StealthFetcher:
             },
         )
         await self._context.add_init_script(STEALTH_INIT_SCRIPT)
+
+        if cf:
+            # Playwright cookie formatı: name/value/domain/path zorunlu
+            try:
+                await self._context.add_cookies([
+                    {
+                        "name": c["name"],
+                        "value": c["value"],
+                        "domain": c.get("domain", ".sahibinden.com"),
+                        "path": c.get("path", "/"),
+                    }
+                    for c in cf["cookies"]
+                ])
+            except Exception:
+                pass
+
         self._page = await self._context.new_page()
 
     async def fetch(self, url: str, *, wait_selector: Optional[str] = None) -> FetchResult:
@@ -330,9 +354,6 @@ def _load_sahibinden_cf(url: str) -> Optional[dict]:
 # Selection
 # --------------------------------------------------------------------------- #
 
-# sahibinden için akış:
-#   - cookie dosyası taze (<2h) → HttpFetcher (curl_cffi) + cookie inject
-#   - cookie eski/yok → StealthFetcher (Playwright; muhtemelen 403, uyarı için)
 def _sahibinden_cookie_fresh() -> bool:
     if not _CF_PATH.exists():
         return False
@@ -348,12 +369,16 @@ def _sahibinden_cookie_fresh() -> bool:
 def select_fetcher(source: Optional[str]):
     """Return an *async-context-manager-compatible* fetcher for the source.
 
-    Heuristic: only spin up a browser when the target needs one. arabam.com
-    yields fine to curl_cffi with chrome124 impersonation. sahibinden kullanır
-    HttpFetcher + cf cookie inject (cookie taze ise) — yoksa StealthFetcher.
+    arabam HttpFetcher (curl_cffi) ile %100 200 alıyor.
+    sahibinden için durum (2026-04-26 doğrulandı):
+      - HttpFetcher + cookie: kategori sayfaları 200 ama brand/model search
+        sayfaları "Giriş" landing'e dönüyor (sonuç JS-render).
+      - StealthFetcher + cookie: Cloudflare challenge sayfasına ("Bir dakika
+        lütfen...") tekrar takılıyor — Playwright otomasyon flag'leri.
+    Pragmatik: sahibinden'i HttpFetcher'a bağla; en azından kategori sayfaları
+    200 dönüyor, parser zamanla geliştirilebilir veya residential proxy
+    eklendiğinde kalıcı çözülür. Şimdilik veri akışı arabam üzerinden.
     """
-    if source == "sahibinden":
-        return HttpFetcher() if _sahibinden_cookie_fresh() else StealthFetcher()
     return HttpFetcher()
 
 

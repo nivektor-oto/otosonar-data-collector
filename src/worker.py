@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from . import persistence, queue
-from .catalog import arabam_brand_model_pairs
+from .catalog import arabam_brand_model_pairs, sahibinden_brand_model_pairs
 from .config import SETTINGS
 from .db import close_pool
 from .fetcher import FetchResult, StealthFetcher, select_fetcher
@@ -39,7 +39,12 @@ async def seed_discovery_jobs(source: str, *, pages_per_combo: int = 2) -> int:
     adapter = REGISTRY[source]
     seeded = 0
     rows: list[dict[str, Any]] = []
-    pairs = arabam_brand_model_pairs() if source == "arabam" else []
+    if source == "arabam":
+        pairs = arabam_brand_model_pairs()
+    elif source == "sahibinden":
+        pairs = sahibinden_brand_model_pairs()
+    else:
+        pairs = []
 
     for brand, model in pairs:
         for page in range(1, pages_per_combo + 1):
